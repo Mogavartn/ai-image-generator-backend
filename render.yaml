@@ -1,0 +1,22 @@
+services:
+  - type: web
+    name: ai-image-generator-backend
+    env: python
+    region: oregon
+    plan: starter
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
+    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 300 app:app
+    
+    envVars:
+      - key: FLASK_ENV
+        value: production
+      - key: FLASK_DEBUG
+        value: false
+      - key: PYTHONPATH
+        value: /opt/render/project/src
+    
+    healthCheckPath: /api/status
+    autoDeploy: true

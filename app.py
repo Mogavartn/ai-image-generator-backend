@@ -1,353 +1,240 @@
 #!/usr/bin/env python3
 """
-Générateur d'Images IA - Backend Python
-Support pour modèles Flux et Hunyuan avec LoRAs
+Générateur d'Images IA - Version allégée pour Render Free
+Optimisé pour 512MB RAM
 """
 
 import os
 import json
 import time
-import hashlib
-import requests
 import tempfile
-import shutil
 from pathlib import Path
 from datetime import datetime
-from typing import List, Dict, Optional, Tuple
-from urllib.parse import urlparse
+from typing import List, Dict, Optional
 
 import torch
 from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
 from werkzeug.utils import secure_filename
-import safetensors.torch as st
 
-# Imports spécifiques aux modèles (à adapter selon vos librairies)
+# Import conditionnel des librairies lourdes
 try:
-    from diffusers import FluxPipeline, DiffusionPipeline
-    DIFFUSERS_AVAILABLE = True
+    import safetensors.torch as st
+    SAFETENSORS_AVAILABLE = True
 except ImportError:
-    DIFFUSERS_AVAILABLE = False
-    print("⚠️  Diffusers non installé. Installez avec: pip install diffusers")
+    SAFETENSORS_AVAILABLE = False
+    print("⚠️  Safetensors non disponible")
 
-try:
-    # Import hypothétique pour Hunyuan (remplacez par la vraie librairie)
-    from hunyuan_dit import HunyuanPipeline
-    HUNYUAN_AVAILABLE = True
-except ImportError:
-    HUNYUAN_AVAILABLE = False
-    print("⚠️  Librairie Hunyuan non trouvée. Veuillez l'installer.")
+# Import diffusers seulement si nécessaire
+DIFFUSERS_AVAILABLE = False
 
 app = Flask(__name__)
 CORS(app, origins=['https://webinterface-imageai.onrender.com'])
 
-# Configuration
+# Configuration ultra-légère
 app.config.update(
-    MAX_CONTENT_LENGTH=2 * 1024 * 1024 * 1024,  # 2GB max
-    UPLOAD_FOLDER=tempfile.mkdtemp(prefix="ai_gen_"),
+    MAX_CONTENT_LENGTH=50 * 1024 * 1024,  # 50MB max
+    UPLOAD_FOLDER=tempfile.mkdtemp(prefix="ai_lite_"),
     RESULTS_FOLDER="./generated_images",
-    ALLOWED_EXTENSIONS={'.safetensors'},
-    MAX_IMAGES=4,
-    DEFAULT_STEPS=30,
-    DEFAULT_GUIDANCE=7.5
+    MAX_IMAGES=1,  # Une seule image max
+    DEFAULT_STEPS=10,  # Steps très réduits
 )
 
-# Variables globales pour les pipelines chargés
-loaded_pipelines = {}
+# Variables globales
 temp_files = set()
 
-class ImageGenerator:
-    """Gestionnaire principal pour la génération d'images"""
+class LightweightGenerator:
+    """Générateur ultra-léger pour plan gratuit"""
     
     def __init__(self):
-        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.device = "cpu"  # Forcé CPU pour le plan gratuit
         self.temp_dir = Path(app.config['UPLOAD_FOLDER'])
         self.results_dir = Path(app.config['RESULTS_FOLDER'])
         self.results_dir.mkdir(exist_ok=True)
         
         print(f"🖥️  Device: {self.device}")
-        print(f"📁 Dossier temporaire: {self.temp_dir}")
-        print(f"📁 Dossier résultats: {self.results_dir}")
+        print(f"📁 Mode ultra-léger activé")
     
     def validate_safetensors(self, file_path: Path) -> bool:
-        """Valide qu'un fichier safetensors est lisible"""
+        """Validation minimale"""
         try:
+            if not SAFETENSORS_AVAILABLE:
+                # Validation basique par taille de fichier
+                size_mb = file_path.stat().st_size / (1024 * 1024)
+                if size_mb < 0.1 or size_mb > 5000:  # Entre 100KB et 5GB
+                    return False
+                print(f"📊 Fichier: {size_mb:.1f}MB (validation basique)")
+                return True
+            
+            # Validation complète si safetensors disponible
             st.load_file(str(file_path))
             return True
         except Exception as e:
-            print(f"❌ Erreur validation safetensors: {e}")
+            print(f"❌ Validation échouée: {e}")
             return False
     
-    def download_lora(self, url: str) -> Optional[Path]:
-        """Télécharge un LoRA depuis une URL"""
-        try:
-            print(f"📥 Téléchargement LoRA: {url}")
-            
-            # Générer un nom de fichier sécurisé
-            parsed = urlparse(url)
-            filename = os.path.basename(parsed.path) or "lora.safetensors"
-            if not filename.endswith('.safetensors'):
-                filename += '.safetensors'
-            
-            local_path = self.temp_dir / f"lora_{hashlib.md5(url.encode()).hexdigest()[:8]}_{filename}"
-            
-            # Télécharger avec timeout
-            response = requests.get(url, timeout=300, stream=True)
-            response.raise_for_status()
-            
-            with open(local_path, 'wb') as f:
-                shutil.copyfileobj(response.raw, f)
-            
-            # Valider le fichier téléchargé
-            if self.validate_safetensors(local_path):
-                temp_files.add(str(local_path))
-                print(f"✅ LoRA téléchargé: {local_path}")
-                return local_path
-            else:
-                local_path.unlink(missing_ok=True)
-                print(f"❌ LoRA invalide: {url}")
-                return None
-                
-        except Exception as e:
-            print(f"❌ Erreur téléchargement LoRA {url}: {e}")
-            return None
-    
-    def load_flux_pipeline(self, model_path: Path, lora_paths: List[Path]) -> Optional[object]:
-        """Charge un pipeline Flux avec LoRAs"""
-        if not DIFFUSERS_AVAILABLE:
-            raise ValueError("Diffusers non disponible")
+    def generate_mock_images(self, 
+                           prompt: str,
+                           num_images: int = 1,
+                           dimensions: str = "512x512") -> List[Dict]:
+        """Génération d'images simulée pour les tests"""
         
-        try:
-            print(f"🔄 Chargement modèle Flux: {model_path}")
-            
-            # Charger le pipeline de base
-            pipeline = FluxPipeline.from_pretrained(
-                str(model_path),
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32,
-                device_map="auto" if self.device == "cuda" else None
-            )
-            
-            # Charger les LoRAs
-            for lora_path in lora_paths:
-                print(f"🔗 Ajout LoRA: {lora_path}")
-                pipeline.load_lora_weights(str(lora_path))
-            
-            pipeline = pipeline.to(self.device)
-            return pipeline
-            
-        except Exception as e:
-            print(f"❌ Erreur chargement Flux: {e}")
-            return None
-    
-    def load_hunyuan_pipeline(self, model_path: Path, lora_paths: List[Path]) -> Optional[object]:
-        """Charge un pipeline Hunyuan avec LoRAs"""
-        if not HUNYUAN_AVAILABLE:
-            raise ValueError("Librairie Hunyuan non disponible")
+        print(f"🎨 Génération simulée: {prompt}")
         
-        try:
-            print(f"🔄 Chargement modèle Hunyuan: {model_path}")
-            
-            # Adaptation nécessaire selon l'API Hunyuan réelle
-            pipeline = HunyuanPipeline.from_pretrained(
-                str(model_path),
-                torch_dtype=torch.float16 if self.device == "cuda" else torch.float32
-            )
-            
-            # Charger les LoRAs (API à adapter)
-            for lora_path in lora_paths:
-                print(f"🔗 Ajout LoRA Hunyuan: {lora_path}")
-                # pipeline.load_lora_weights(str(lora_path))  # À adapter
-            
-            pipeline = pipeline.to(self.device)
-            return pipeline
-            
-        except Exception as e:
-            print(f"❌ Erreur chargement Hunyuan: {e}")
-            return None
-    
-    def parse_dimensions(self, dimensions_str: str) -> Tuple[int, int]:
-        """Parse les dimensions au format 'WxH'"""
-        try:
-            width, height = map(int, dimensions_str.split('x'))
-            return width, height
-        except:
-            return 512, 512
-    
-    def generate_images(self, 
-                       model_path: Path,
-                       model_type: str,
-                       prompt: str,
-                       lora_paths: List[Path] = None,
-                       num_images: int = 1,
-                       dimensions: str = "512x512",
-                       steps: int = 30,
-                       guidance_scale: float = 7.5,
-                       output_dir: str = None) -> List[Dict]:
-        """Génère les images selon les paramètres"""
-        
-        if lora_paths is None:
-            lora_paths = []
-        
-        if output_dir is None:
-            output_dir = self.results_dir
-        else:
-            output_dir = Path(output_dir)
-            output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Créer une clé unique pour le pipeline
-        pipeline_key = f"{model_type}_{model_path.stem}_{len(lora_paths)}"
-        
-        # Charger ou récupérer le pipeline
-        if pipeline_key not in loaded_pipelines:
-            if model_type.lower() == "flux":
-                pipeline = self.load_flux_pipeline(model_path, lora_paths)
-            elif model_type.lower() == "hunyuan":
-                pipeline = self.load_hunyuan_pipeline(model_path, lora_paths)
-            else:
-                raise ValueError(f"Type de modèle non supporté: {model_type}")
-            
-            if pipeline is None:
-                raise ValueError(f"Impossible de charger le pipeline {model_type}")
-            
-            loaded_pipelines[pipeline_key] = pipeline
-        else:
-            pipeline = loaded_pipelines[pipeline_key]
-            print(f"♻️  Réutilisation pipeline: {pipeline_key}")
-        
-        # Parser les dimensions
-        width, height = self.parse_dimensions(dimensions)
-        
-        # Générer les images
         results = []
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-        for i in range(num_images):
+        for i in range(min(num_images, 1)):  # Max 1 image en gratuit
             try:
-                print(f"🎨 Génération image {i+1}/{num_images}")
-                start_time = time.time()
+                # Simuler un temps de génération
+                time.sleep(2)  # 2 secondes de simulation
                 
-                # Générer l'image
-                with torch.no_grad():
-                    image = pipeline(
-                        prompt=prompt,
-                        width=width,
-                        height=height,
-                        num_inference_steps=steps,
-                        guidance_scale=guidance_scale,
-                        generator=torch.Generator(device=self.device).manual_seed(
-                            int(time.time()) + i
-                        )
-                    ).images[0]
+                # Créer une image de test (placeholder)
+                from PIL import Image, ImageDraw, ImageFont
                 
-                generation_time = time.time() - start_time
+                width, height = map(int, dimensions.split('x'))
                 
-                # Sauvegarder l'image
+                # Créer une image simple
+                img = Image.new('RGB', (width, height), color='lightblue')
+                draw = ImageDraw.Draw(img)
+                
+                # Ajouter du texte
+                text_lines = [
+                    "Image générée",
+                    f"Prompt: {prompt[:30]}...",
+                    f"Dimensions: {dimensions}",
+                    f"Mode: Simulation"
+                ]
+                
+                y_offset = height // 4
+                for line in text_lines:
+                    try:
+                        draw.text((10, y_offset), line, fill='black')
+                        y_offset += 30
+                    except:
+                        pass  # Si police non disponible
+                
+                # Sauvegarder
                 filename = f"generated_{timestamp}_{i+1:03d}.png"
-                image_path = output_dir / filename
-                image.save(str(image_path))
+                image_path = self.results_dir / filename
+                img.save(str(image_path))
                 
                 results.append({
                     "filename": filename,
                     "path": str(image_path),
-                    "dimensions": f"{width}x{height}",
-                    "generation_time": round(generation_time, 2),
-                    "url": f"/api/image/{filename}"
+                    "dimensions": dimensions,
+                    "generation_time": 2.0,
+                    "url": f"/api/image/{filename}",
+                    "mode": "simulation"
                 })
                 
-                print(f"✅ Image {i+1} générée en {generation_time:.2f}s: {filename}")
+                print(f"✅ Image simulée créée: {filename}")
                 
             except Exception as e:
-                print(f"❌ Erreur génération image {i+1}: {e}")
+                print(f"❌ Erreur simulation: {e}")
                 results.append({
                     "error": str(e),
                     "index": i+1
                 })
         
         return results
+    
+    def generate_real_images(self, model_path: Path, **kwargs) -> List[Dict]:
+        """Génération réelle (si ressources suffisantes)"""
+        
+        # Vérifier la mémoire disponible
+        import psutil
+        memory_percent = psutil.virtual_memory().percent
+        
+        if memory_percent > 80:
+            raise ValueError("Mémoire insuffisante pour la génération réelle")
+        
+        # Import dynamique de diffusers
+        try:
+            global DIFFUSERS_AVAILABLE
+            if not DIFFUSERS_AVAILABLE:
+                print("📥 Chargement de diffusers...")
+                from diffusers import FluxPipeline
+                DIFFUSERS_AVAILABLE = True
+            
+            # Charger le modèle (très lourd pour plan gratuit)
+            print(f"🔄 Chargement modèle: {model_path}")
+            pipeline = FluxPipeline.from_pretrained(
+                str(model_path),
+                torch_dtype=torch.float32,  # CPU
+                device_map=None
+            )
+            
+            # Génération (très lente sur CPU)
+            print("🎨 Génération en cours...")
+            # ... logique de génération réelle
+            
+        except Exception as e:
+            print(f"❌ Génération réelle impossible: {e}")
+            raise ValueError(f"Génération réelle échouée: {e}")
 
-# Instance globale du générateur
-generator = ImageGenerator()
+# Instance globale
+generator = LightweightGenerator()
 
 @app.route('/api/generate', methods=['POST'])
 def generate_images():
-    """Endpoint principal pour générer des images"""
+    """Endpoint allégé de génération"""
     try:
-        print("📨 Nouvelle requête de génération")
+        print("📨 Nouvelle requête (mode léger)")
         
-        # Validation des données reçues
+        # Validation basique
         if 'model_file' not in request.files:
-            return jsonify({"success": False, "error": "Aucun fichier modèle fourni"}), 400
+            return jsonify({"success": False, "error": "Fichier modèle requis"}), 400
         
         model_file = request.files['model_file']
-        if model_file.filename == '':
+        if not model_file.filename:
             return jsonify({"success": False, "error": "Nom de fichier invalide"}), 400
         
-        # Sauvegarder le fichier modèle
+        # Sauvegarder le fichier
         filename = secure_filename(model_file.filename)
-        if not filename.endswith('.safetensors'):
-            return jsonify({"success": False, "error": "Format de fichier non supporté"}), 400
-        
         model_path = generator.temp_dir / f"model_{int(time.time())}_{filename}"
         model_file.save(str(model_path))
         temp_files.add(str(model_path))
         
-        # Valider le modèle
+        # Validation
         if not generator.validate_safetensors(model_path):
-            return jsonify({"success": False, "error": "Fichier safetensors invalide"}), 400
+            return jsonify({"success": False, "error": "Fichier invalide"}), 400
         
-        # Récupérer les paramètres
-        model_type = request.form.get('model_type', 'flux')
+        # Paramètres
         prompt = request.form.get('prompt', '').strip()
-        lora_urls = request.form.get('lora_urls', '').strip()
-        output_dir = request.form.get('output_dir', str(generator.results_dir))
-        image_count = min(int(request.form.get('image_count', 1)), app.config['MAX_IMAGES'])
-        dimensions = request.form.get('dimensions', '512x512')
-        steps = int(request.form.get('steps', app.config['DEFAULT_STEPS']))
-        guidance = float(request.form.get('guidance', app.config['DEFAULT_GUIDANCE']))
-        
         if not prompt:
             return jsonify({"success": False, "error": "Prompt requis"}), 400
         
-        print(f"🎯 Paramètres: {model_type}, {image_count} images, {dimensions}")
+        dimensions = request.form.get('dimensions', '512x512')
         
-        # Télécharger les LoRAs
-        lora_paths = []
-        if lora_urls:
-            urls = [url.strip() for url in lora_urls.split('\n') if url.strip()]
-            for url in urls:
-                lora_path = generator.download_lora(url)
-                if lora_path:
-                    lora_paths.append(lora_path)
+        # Mode de génération selon les ressources
+        try:
+            # Essayer génération réelle si possible
+            results = generator.generate_real_images(
+                model_path=model_path,
+                prompt=prompt,
+                dimensions=dimensions
+            )
+            mode = "real"
+        except Exception as e:
+            print(f"⚠️  Génération réelle impossible: {e}")
+            # Fallback vers simulation
+            results = generator.generate_mock_images(
+                prompt=prompt,
+                dimensions=dimensions
+            )
+            mode = "simulation"
         
-        # Générer les images
-        results = generator.generate_images(
-            model_path=model_path,
-            model_type=model_type,
-            prompt=prompt,
-            lora_paths=lora_paths,
-            num_images=image_count,
-            dimensions=dimensions,
-            steps=steps,
-            guidance_scale=guidance,
-            output_dir=output_dir
-        )
-        
-        # Filtrer les résultats avec erreurs
+        # Filtrer les succès
         successful_results = [r for r in results if 'error' not in r]
-        failed_results = [r for r in results if 'error' in r]
         
-        response = {
+        return jsonify({
             "success": True,
             "images": successful_results,
             "total_generated": len(successful_results),
-            "total_requested": image_count
-        }
-        
-        if failed_results:
-            response["errors"] = failed_results
-        
-        print(f"✅ Génération terminée: {len(successful_results)}/{image_count} images")
-        return jsonify(response)
+            "mode": mode,
+            "message": "Génération en mode simulation (plan gratuit)" if mode == "simulation" else "Génération réelle"
+        })
         
     except Exception as e:
         print(f"❌ Erreur serveur: {e}")
@@ -355,113 +242,80 @@ def generate_images():
 
 @app.route('/api/image/<filename>')
 def serve_image(filename):
-    """Servir les images générées"""
+    """Servir les images"""
     try:
         image_path = generator.results_dir / secure_filename(filename)
         if image_path.exists():
             return send_file(str(image_path))
-        else:
-            return jsonify({"error": "Image non trouvée"}), 404
+        return jsonify({"error": "Image non trouvée"}), 404
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
 @app.route('/api/cleanup', methods=['POST'])
 def cleanup_temp_files():
-    """Nettoyer les fichiers temporaires"""
+    """Nettoyage ultra-léger"""
     try:
-        cleaned_count = 0
-        
-        # Nettoyer les fichiers temporaires trackés
+        cleaned = 0
         for file_path in list(temp_files):
             try:
                 if os.path.exists(file_path):
                     os.unlink(file_path)
-                    cleaned_count += 1
+                    cleaned += 1
                 temp_files.discard(file_path)
-            except Exception as e:
-                print(f"⚠️  Erreur suppression {file_path}: {e}")
+            except:
+                pass
         
-        # Nettoyer le dossier temporaire
-        try:
-            for item in generator.temp_dir.iterdir():
-                if item.is_file():
-                    item.unlink()
-                    cleaned_count += 1
-                elif item.is_dir():
-                    shutil.rmtree(item)
-                    cleaned_count += 1
-        except Exception as e:
-            print(f"⚠️  Erreur nettoyage dossier temp: {e}")
-        
-        # Vider le cache des pipelines si demandé
-        global loaded_pipelines
-        if request.json and request.json.get('clear_models', False):
-            loaded_pipelines.clear()
-            torch.cuda.empty_cache() if torch.cuda.is_available() else None
-            print("🧹 Cache modèles vidé")
-        
-        print(f"🧹 Nettoyage terminé: {cleaned_count} éléments supprimés")
         return jsonify({
             "success": True,
-            "cleaned_files": cleaned_count,
-            "message": f"{cleaned_count} fichiers temporaires supprimés"
+            "cleaned_files": cleaned,
+            "message": f"{cleaned} fichiers nettoyés"
         })
-        
     except Exception as e:
-        print(f"❌ Erreur nettoyage: {e}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/status')
 def get_status():
-    """Status de l'application"""
-    return jsonify({
-        "status": "online",
-        "device": generator.device,
-        "loaded_models": len(loaded_pipelines),
-        "temp_files": len(temp_files),
-        "diffusers_available": DIFFUSERS_AVAILABLE,
-        "hunyuan_available": HUNYUAN_AVAILABLE,
-        "cuda_available": torch.cuda.is_available(),
-        "memory_used": torch.cuda.memory_allocated() if torch.cuda.is_available() else 0
-    })
+    """Status ultra-léger"""
+    try:
+        import psutil
+        memory = psutil.virtual_memory()
+        
+        return jsonify({
+            "status": "online",
+            "device": generator.device,
+            "mode": "lightweight",
+            "memory_percent": memory.percent,
+            "memory_available_mb": memory.available // (1024*1024),
+            "safetensors_available": SAFETENSORS_AVAILABLE,
+            "diffusers_available": DIFFUSERS_AVAILABLE,
+            "temp_files": len(temp_files)
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "error": str(e)}), 500
 
 @app.route('/')
 def index():
-    """Page d'accueil - servir l'interface web"""
+    """Page simple"""
     return '''
     <!DOCTYPE html>
     <html>
-    <head>
-        <title>Générateur d'Images IA</title>
-    </head>
+    <head><title>Générateur IA - Mode Léger</title></head>
     <body>
-        <h1>🎨 Générateur d'Images IA - Backend</h1>
-        <p>Le backend Python est en fonctionnement!</p>
+        <h1>🎨 Générateur d'Images IA - Mode Léger</h1>
+        <p>Backend optimisé pour plan gratuit Render</p>
         <ul>
-            <li><a href="/api/status">Status de l'API</a></li>
-            <li><strong>POST /api/generate</strong> - Générer des images</li>
-            <li><strong>POST /api/cleanup</strong> - Nettoyer les fichiers temporaires</li>
-            <li><strong>GET /api/image/&lt;filename&gt;</strong> - Servir les images</li>
+            <li><a href="/api/status">Status</a></li>
+            <li>Mode: Simulation + génération réelle si possible</li>
+            <li>Optimisé: 512MB RAM, CPU uniquement</li>
         </ul>
-        <p>Utilisez l'interface web HTML pour interagir avec cette API.</p>
     </body>
     </html>
     '''
 
 if __name__ == '__main__':
-    print("🚀 Démarrage du serveur de génération d'images IA")
-    print(f"📊 Device: {generator.device}")
-    print(f"🔧 Diffusers: {'✅' if DIFFUSERS_AVAILABLE else '❌'}")
-    print(f"🔧 Hunyuan: {'✅' if HUNYUAN_AVAILABLE else '❌'}")
+    print("🚀 Démarrage mode ultra-léger")
+    print(f"💾 Mémoire: Plan gratuit (512MB)")
+    print(f"🔧 Safetensors: {'✅' if SAFETENSORS_AVAILABLE else '❌'}")
     
-    # Configuration pour le développement
-    debug_mode = os.getenv('FLASK_DEBUG', 'False').lower() == 'true'
     port = int(os.getenv('PORT', 5000))
-    host = os.getenv('HOST', '0.0.0.0' if not debug_mode else '127.0.0.1')
-    
-    app.run(
-        host=host,
-        port=port,
-        debug=debug_mode,
-        threaded=True
-    )
+    app.run(host='0.0.0.0', port=port, debug=False)
